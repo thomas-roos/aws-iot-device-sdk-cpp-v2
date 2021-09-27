@@ -12,6 +12,22 @@
 
 static int s_TestDeviceDefenderResourceSafety(Aws::Crt::Allocator *allocator, void *ctx)
 {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool taskStopped = false;
+    bool disconnectComplete = false;
+    bool callbackSuccess = false;
+
+    auto onCancelled = [&](void *a) -> void {
+        auto *data = reinterpret_cast<bool *>(a);
+        *data = true;
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            taskStopped = true;
+        }
+        cv.notify_one();
+    };
+
     (void)ctx;
     {
         Aws::Crt::ApiHandle apiHandle(allocator);
@@ -37,24 +53,16 @@ static int s_TestDeviceDefenderResourceSafety(Aws::Crt::Allocator *allocator, vo
         Aws::Crt::Mqtt::MqttClient mqttClient(clientBootstrap, allocator);
         ASSERT_TRUE(mqttClient);
 
-        Aws::Crt::Mqtt::MqttClient mqttClientMoved = std::move(mqttClient);
-        ASSERT_TRUE(mqttClientMoved);
-
-        auto mqttConnection = mqttClientMoved.NewConnection("www.example.com", 443, socketOptions, tlsContext);
-
-        const Aws::Crt::String thingName("TestThing");
-        bool callbackSuccess = false;
-
-        std::mutex mutex;
-        std::condition_variable cv;
-        bool taskStopped = false;
-
-        auto onCancelled = [&](void *a) -> void {
-            auto *data = reinterpret_cast<bool *>(a);
-            *data = true;
-            taskStopped = true;
+        auto mqttConnection = mqttClient.NewConnection("www.example.com", 443, socketOptions, tlsContext);
+        mqttConnection->OnDisconnect = [&](Aws::Crt::Mqtt::MqttConnection &) {
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                disconnectComplete = true;
+            }
             cv.notify_one();
         };
+
+        const Aws::Crt::String thingName("TestThing");
 
         Aws::Iotdevicedefenderv1::ReportTaskBuilder taskBuilder(allocator, mqttConnection, eventLoopGroup, thingName);
         taskBuilder.WithTaskPeriodSeconds((uint32_t)1UL)
@@ -81,10 +89,11 @@ static int s_TestDeviceDefenderResourceSafety(Aws::Crt::Allocator *allocator, vo
 
         ASSERT_TRUE(callbackSuccess);
 
-        mqttConnection->Disconnect();
-        ASSERT_TRUE(mqttConnection);
-
-        ASSERT_FALSE(mqttClient);
+        if (mqttConnection->Disconnect())
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [&]() { return disconnectComplete; });
+        }
 
         ASSERT_INT_EQUALS((int)Aws::Iotdevicedefenderv1::ReportTaskStatus::Stopped, (int)task->GetStatus());
     }
@@ -121,10 +130,7 @@ static int s_TestDeviceDefenderFailedTest(Aws::Crt::Allocator *allocator, void *
         Aws::Crt::Mqtt::MqttClient mqttClient(clientBootstrap, allocator);
         ASSERT_TRUE(mqttClient);
 
-        Aws::Crt::Mqtt::MqttClient mqttClientMoved = std::move(mqttClient);
-        ASSERT_TRUE(mqttClientMoved);
-
-        auto mqttConnection = mqttClientMoved.NewConnection("www.example.com", 443, socketOptions, tlsContext);
+        auto mqttConnection = mqttClient.NewConnection("www.example.com", 443, socketOptions, tlsContext);
 
         const Aws::Crt::String thingName("TestThing");
         Aws::Crt::String data("TestData");
@@ -143,9 +149,6 @@ static int s_TestDeviceDefenderFailedTest(Aws::Crt::Allocator *allocator, void *
         ASSERT_TRUE(aws_last_error() == AWS_ERROR_INVALID_STATE);
 
         mqttConnection->Disconnect();
-        ASSERT_TRUE(mqttConnection);
-
-        ASSERT_FALSE(mqttClient);
     }
 
     return AWS_ERROR_SUCCESS;

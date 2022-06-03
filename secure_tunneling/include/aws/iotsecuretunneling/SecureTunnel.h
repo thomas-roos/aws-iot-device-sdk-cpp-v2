@@ -155,7 +155,7 @@ namespace Aws
 
             int Close();
 
-            void Stop();
+            void Shutdown();
 
             int SendData(const Crt::ByteCursor &data);
 
@@ -164,6 +164,8 @@ namespace Aws
             int SendStreamReset();
 
             aws_secure_tunnel *GetUnderlyingHandle();
+
+            std::shared_ptr<std::promise<void>> GetTerminationPromise() const { return m_TerminationComplete; }
 
           private:
             /**
@@ -189,29 +191,11 @@ namespace Aws
                 OnStreamReset onStreamReset,
                 OnSessionReset onSessionReset);
 
-            // aws-c-iot callbacks
-            static void s_OnConnectionComplete(void *user_data);
-            static void s_OnConnectionShutdown(void *user_data);
-            static void s_OnSendDataComplete(int error_code, void *user_data);
-            static void s_OnDataReceive(const struct aws_byte_buf *data, void *user_data);
-            static void s_OnStreamStart(void *user_data);
-            static void s_OnStreamReset(void *user_data);
-            static void s_OnSessionReset(void *user_data);
-            static void s_OnTerminationComplete(void *user_data);
-
             void OnTerminationComplete();
 
-            // Client callbacks
-            OnConnectionComplete m_OnConnectionComplete;
-            OnConnectionShutdown m_OnConnectionShutdown;
-            OnSendDataComplete m_OnSendDataComplete;
-            OnDataReceive m_OnDataReceive;
-            OnStreamStart m_OnStreamStart;
-            OnStreamReset m_OnStreamReset;
-            OnSessionReset m_OnSessionReset;
             aws_secure_tunnel *m_secure_tunnel;
 
-            std::promise<void> m_TerminationComplete;
+            std::shared_ptr<std::promise<void>> m_TerminationComplete;
 
             friend class SecureTunnelBuilder;
         };

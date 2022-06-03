@@ -120,6 +120,118 @@ namespace Aws
             return tunnel;
         }
 
+        class SecureTunnelBinding
+        {
+          public:
+            SecureTunnelBinding(void) = delete;
+            SecureTunnelBinding(SecureTunnelBinding &&other) = delete;
+            SecureTunnelBinding(const SecureTunnelBinding &other) = delete;
+
+            SecureTunnelBinding &operator=(const SecureTunnelBinding &rhs) = delete;
+            SecureTunnelBinding &operator=(SecureTunnelBinding &&rhs) = delete;
+
+            SecureTunnelBinding(
+                struct aws_allocator *allocator,
+                OnConnectionComplete onConnectionComplete,
+                OnConnectionShutdown onConnectionShutdown,
+                OnSendDataComplete onSendDataComplete,
+                OnDataReceive onDataReceive,
+                OnStreamStart onStreamStart,
+                OnStreamReset onStreamReset,
+                OnSessionReset onSessionReset,
+                std::shared_ptr<std::promise<void>> terminationComplete)
+                : m_Allocator(allocator), m_OnConnectionComplete(std::move(onConnectionComplete)),
+                  m_OnConnectionShutdown(std::move(onConnectionShutdown)),
+                  m_OnSendDataComplete(std::move(onSendDataComplete)), m_OnDataReceive(std::move(onDataReceive)),
+                  m_OnStreamStart(std::move(onStreamStart)), m_OnStreamReset(std::move(onStreamReset)),
+                  m_OnSessionReset(std::move(onSessionReset)), m_TerminationComplete(terminationComplete)
+            {
+            }
+
+            virtual ~SecureTunnelBinding() { m_TerminationComplete->set_value(); }
+
+            struct aws_allocator *m_Allocator;
+
+            OnConnectionComplete m_OnConnectionComplete;
+            OnConnectionShutdown m_OnConnectionShutdown;
+            OnSendDataComplete m_OnSendDataComplete;
+            OnDataReceive m_OnDataReceive;
+            OnStreamStart m_OnStreamStart;
+            OnStreamReset m_OnStreamReset;
+            OnSessionReset m_OnSessionReset;
+
+            std::shared_ptr<std::promise<void>> m_TerminationComplete;
+        };
+
+        static void s_OnConnectionComplete(void *user_data)
+        {
+            auto *secureTunnelBinding = static_cast<SecureTunnelBinding *>(user_data);
+            if (secureTunnelBinding->m_OnConnectionComplete)
+            {
+                secureTunnelBinding->m_OnConnectionComplete();
+            }
+        }
+
+        static void s_OnConnectionShutdown(void *user_data)
+        {
+            auto *secureTunnelBinding = static_cast<SecureTunnelBinding *>(user_data);
+            if (secureTunnelBinding->m_OnConnectionShutdown)
+            {
+                secureTunnelBinding->m_OnConnectionShutdown();
+            }
+        }
+
+        static void s_OnSendDataComplete(int error_code, void *user_data)
+        {
+            auto *secureTunnelBinding = static_cast<SecureTunnelBinding *>(user_data);
+            if (secureTunnelBinding->m_OnSendDataComplete)
+            {
+                secureTunnelBinding->m_OnSendDataComplete(error_code);
+            }
+        }
+
+        static void s_OnDataReceive(const struct aws_byte_buf *data, void *user_data)
+        {
+            auto *secureTunnelBinding = static_cast<SecureTunnelBinding *>(user_data);
+            if (secureTunnelBinding->m_OnDataReceive)
+            {
+                secureTunnelBinding->m_OnDataReceive(*data);
+            }
+        }
+
+        static void s_OnStreamStart(void *user_data)
+        {
+            auto *secureTunnelBinding = static_cast<SecureTunnelBinding *>(user_data);
+            if (secureTunnelBinding->m_OnStreamStart)
+            {
+                secureTunnelBinding->m_OnStreamStart();
+            }
+        }
+
+        static void s_OnStreamReset(void *user_data)
+        {
+            auto *secureTunnelBinding = static_cast<SecureTunnelBinding *>(user_data);
+            if (secureTunnelBinding->m_OnStreamReset)
+            {
+                secureTunnelBinding->m_OnStreamReset();
+            }
+        }
+
+        static void s_OnSessionReset(void *user_data)
+        {
+            auto *secureTunnelBinding = static_cast<SecureTunnelBinding *>(user_data);
+            if (secureTunnelBinding->m_OnSessionReset)
+            {
+                secureTunnelBinding->m_OnSessionReset();
+            }
+        }
+
+        static void s_OnTerminationComplete(void *user_data)
+        {
+            auto *secureTunnelBinding = static_cast<SecureTunnelBinding *>(user_data);
+            Aws::Crt::Delete(secureTunnelBinding, secureTunnelBinding->m_Allocator);
+        }
+
         /**
          * Private SecureTunnel constructor used by SecureTunnelBuilder on SecureTunnelBuilder::Build() and by old
          * SecureTunnel constructor which should be deprecated
@@ -142,16 +254,8 @@ namespace Aws
             OnStreamStart onStreamStart,
             OnStreamReset onStreamReset,
             OnSessionReset onSessionReset)
+            : m_TerminationComplete(Aws::Crt::MakeShared<std::promise<void>>(allocator))
         {
-            // Client callbacks
-            m_OnConnectionComplete = std::move(onConnectionComplete);
-            m_OnConnectionShutdown = std::move(onConnectionShutdown);
-            m_OnSendDataComplete = std::move(onSendDataComplete);
-            m_OnDataReceive = std::move(onDataReceive);
-            m_OnStreamStart = std::move(onStreamStart);
-            m_OnStreamReset = std::move(onStreamReset);
-            m_OnSessionReset = std::move(onSessionReset);
-
             // Initialize aws_secure_tunnel_options
             aws_secure_tunnel_options config;
             AWS_ZERO_STRUCT(config);
@@ -188,8 +292,25 @@ namespace Aws
                 config.http_proxy_options = &temp;
             }
 
+            auto binding = Aws::Crt::New<SecureTunnelBinding>(
+                allocator,
+                allocator,
+                onConnectionComplete,
+                onConnectionShutdown,
+                onSendDataComplete,
+                onDataReceive,
+                onStreamStart,
+                onStreamReset,
+                onSessionReset,
+                m_TerminationComplete);
+            config.user_data = binding;
+
             // Create the secure tunnel
             m_secure_tunnel = aws_secure_tunnel_new(&config);
+            if (m_secure_tunnel == nullptr)
+            {
+                Aws::Crt::Delete(binding, allocator);
+            }
         }
 
         /**
@@ -273,18 +394,9 @@ namespace Aws
 
         SecureTunnel::SecureTunnel(SecureTunnel &&other) noexcept
         {
-            m_OnConnectionComplete = std::move(other.m_OnConnectionComplete);
-            m_OnConnectionShutdown = std::move(other.m_OnConnectionShutdown);
-            m_OnSendDataComplete = std::move(other.m_OnSendDataComplete);
-            m_OnDataReceive = std::move(other.m_OnDataReceive);
-            m_OnStreamStart = std::move(other.m_OnStreamStart);
-            m_OnStreamReset = std::move(other.m_OnStreamReset);
-            m_OnSessionReset = std::move(other.m_OnSessionReset);
-
             m_TerminationComplete = std::move(other.m_TerminationComplete);
 
             m_secure_tunnel = other.m_secure_tunnel;
-
             other.m_secure_tunnel = nullptr;
         }
 
@@ -302,18 +414,9 @@ namespace Aws
             {
                 this->~SecureTunnel();
 
-                m_OnConnectionComplete = std::move(other.m_OnConnectionComplete);
-                m_OnConnectionShutdown = std::move(other.m_OnConnectionShutdown);
-                m_OnSendDataComplete = std::move(other.m_OnSendDataComplete);
-                m_OnDataReceive = std::move(other.m_OnDataReceive);
-                m_OnStreamStart = std::move(other.m_OnStreamStart);
-                m_OnStreamReset = std::move(other.m_OnStreamReset);
-                m_OnSessionReset = std::move(other.m_OnSessionReset);
-
                 m_TerminationComplete = std::move(other.m_TerminationComplete);
 
                 m_secure_tunnel = other.m_secure_tunnel;
-
                 other.m_secure_tunnel = nullptr;
             }
 
@@ -337,84 +440,13 @@ namespace Aws
 
         aws_secure_tunnel *SecureTunnel::GetUnderlyingHandle() { return m_secure_tunnel; }
 
-        void SecureTunnel::s_OnConnectionComplete(void *user_data)
-        {
-            auto *secureTunnel = static_cast<SecureTunnel *>(user_data);
-            if (secureTunnel->m_OnConnectionComplete)
-            {
-                secureTunnel->m_OnConnectionComplete();
-            }
-        }
-
-        void SecureTunnel::s_OnConnectionShutdown(void *user_data)
-        {
-            auto *secureTunnel = static_cast<SecureTunnel *>(user_data);
-            if (secureTunnel->m_OnConnectionShutdown)
-            {
-                secureTunnel->m_OnConnectionShutdown();
-            }
-        }
-
-        void SecureTunnel::s_OnSendDataComplete(int error_code, void *user_data)
-        {
-            auto *secureTunnel = static_cast<SecureTunnel *>(user_data);
-            if (secureTunnel->m_OnSendDataComplete)
-            {
-                secureTunnel->m_OnSendDataComplete(error_code);
-            }
-        }
-
-        void SecureTunnel::s_OnDataReceive(const struct aws_byte_buf *data, void *user_data)
-        {
-            auto *secureTunnel = static_cast<SecureTunnel *>(user_data);
-            if (secureTunnel->m_OnDataReceive)
-            {
-                secureTunnel->m_OnDataReceive(*data);
-            }
-        }
-
-        void SecureTunnel::s_OnStreamStart(void *user_data)
-        {
-            auto *secureTunnel = static_cast<SecureTunnel *>(user_data);
-            if (secureTunnel->m_OnStreamStart)
-            {
-                secureTunnel->m_OnStreamStart();
-            }
-        }
-
-        void SecureTunnel::s_OnStreamReset(void *user_data)
-        {
-            auto *secureTunnel = static_cast<SecureTunnel *>(user_data);
-            if (secureTunnel->m_OnStreamReset)
-            {
-                secureTunnel->m_OnStreamReset();
-            }
-        }
-
-        void SecureTunnel::s_OnSessionReset(void *user_data)
-        {
-            auto *secureTunnel = static_cast<SecureTunnel *>(user_data);
-            if (secureTunnel->m_OnSessionReset)
-            {
-                secureTunnel->m_OnSessionReset();
-            }
-        }
-
-        void SecureTunnel::s_OnTerminationComplete(void *user_data)
-        {
-            auto *secureTunnel = static_cast<SecureTunnel *>(user_data);
-            secureTunnel->OnTerminationComplete();
-        }
-
-        void SecureTunnel::OnTerminationComplete() { m_TerminationComplete.set_value(); }
-
-        void SecureTunnel::Stop()
+        void SecureTunnel::Shutdown()
         {
             Close();
             aws_secure_tunnel_release(m_secure_tunnel);
             m_secure_tunnel = nullptr;
 
-            m_TerminationComplete.get_future().wait();
+            m_TerminationComplete->get_future().wait();
         }
     } // namespace Iotsecuretunneling
 } // namespace Aws
